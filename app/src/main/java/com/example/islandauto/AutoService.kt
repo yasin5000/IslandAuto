@@ -543,47 +543,90 @@ class AutoService : AccessibilityService() {
         val stuck = sec >= 15
         sb.append(if (stuck) "\u26A0 Atke ase: " else "\u25B6 Cholche: ").append(stepName(step))
         sb.append(" (").append(sec).append("s)")
+        if (stuck && diag.isNotEmpty() && (step == 6 || step == 8)) sb.append('\n').append(diag)
         showStatus(sb.toString(), if (stuck) 0xEEE65100.toInt() else 0xEE263238.toInt())
     }
 
     // ---------------- "I understand" notice (scroll lage kina auto bujhe) ----------------
 
-    private fun isNoticeScreen(root: AccessibilityNodeInfo): Boolean {
-        val keys = listOf("Welcome to your new account", "Your school manages", "Workspace for Education",
-            "ask your school", "internal policies")
-        return keys.any { root.findAccessibilityNodeInfosByText(it).isNotEmpty() }
-    }
+    private var diag = ""
+    private var gestureOk = true
+    private var blindTicks = 0
+    private var blindCycles = 0
 
     // true = kichu ekta kora hoyeche (click ba scroll). Notice screen na hole false
     private fun handleUnderstand(root: AccessibilityNodeInfo): Boolean {
         val now = SystemClock.uptimeMillis()
-        if (now - lastUnderstandAt < 2500) return inNotice      // click er por screen change er opekkha
+        if (now - lastUnderstandAt < 2500) return true      // click er por screen change er opekkha
 
         val m = resources.displayMetrics
         val r = Rect()
-        // 1) Button screen e dekha gele (scroll lagle o, na lagle o) click
-        val btn = root.findAccessibilityNodeInfosByText("I understand").firstOrNull {
-            it.getBoundsInScreen(r)
-            it.isVisibleToUser && r.height() > 0 && r.bottom <= m.heightPixels && r.top >= 0
+
+        // Poro tree ta nijei ghure text collect (findAccessibilityNodeInfosByText WebView e bhorsha na)
+        var nodes = 0
+        val texts = ArrayList<Pair<AccessibilityNodeInfo, String>>()
+        fun walk(n: AccessibilityNodeInfo, d: Int) {
+            if (d > 60) return
+            nodes++
+            val t = (n.text ?: n.contentDescription)?.toString()?.trim()
+            if (!t.isNullOrEmpty()) texts.add(Pair(n, t))
+            for (i in 0 until n.childCount) { n.getChild(i)?.let { walk(it, d + 1) } }
         }
+        walk(root, 0)
+        diag = "pkg=${root.packageName} nodes=$nodes texts=${texts.size} gesture=${if (gestureOk) "ok" else "FAIL"}"
+
+        // 1) Button dekha gele click (scroll lagle o, na lagle o)
+        val btn = texts.firstOrNull {
+            it.second.length < 30 && it.second.contains("I understand", ignoreCase = true)
+        }?.first
         if (btn != null) {
-            inNotice = true
             btn.getBoundsInScreen(r)
-            var x: AccessibilityNodeInfo? = btn
-            while (x != null && !x.isClickable) x = x.parent
-            val ok = (x != null && x.isEnabled && x.performAction(AccessibilityNodeInfo.ACTION_CLICK)) ||
-                tapAt(r.centerX().toFloat(), r.centerY().toFloat())
-            if (ok) { lastUnderstandAt = now; inNotice = false; return true }
+            if (r.height() > 0 && r.centerY() in 1 until m.heightPixels) {
+                var x: AccessibilityNodeInfo? = btn
+                while (x != null && !x.isClickable) x = x.parent
+                if (!(x != null && x.isEnabled && x.performAction(AccessibilityNodeInfo.ACTION_CLICK)))
+                    tapAt(r.centerX().toFloat(), r.centerY().toFloat())
+                lastUnderstandAt = now; inNotice = false; blindTicks = 0
+                return true
+            }
+            // button ache kintu screen er baire -> niche scroll
+            inNotice = true
+        }
+
+        // 2) Notice screen chena
+        val keys = listOf("Welcome to your new account", "Your school manages", "Workspace for Education",
+            "ask your school", "internal policies")
+        if (texts.any { t -> keys.any { t.second.contains(it, ignoreCase = true) } }) inNotice = true
+
+        // 3) Tree te web text-i nei (Chrome/WebView accessibility e dekha jay na) -> andaj coordinate mode
+        val blind = !inNotice && texts.size < 4 && findEditable(root) == null &&
+            now - stepSince >= 20_000 && blindCycles < 3
+
+        if (!inNotice && !blind) return false
+
+        if (blind) {
+            blindTicks++
+            when {
+                blindTicks <= 6 -> swipeUp()                                      // ekdom niche jawar jonno
+                blindTicks == 7 -> {                                              // "I understand" er shocharachor jayga
+                    tapAt(m.widthPixels * 0.75f, m.heightPixels * 0.885f); lastUnderstandAt = now
+                }
+                else -> { blindTicks = 0; blindCycles++ }
+            }
+            diag += " MODE=blind(${blindCycles + 1}/3)"
             return true
         }
-        // 2) Notice screen kintu button dekha jacche na -> niche scroll
-        if (isNoticeScreen(root)) inNotice = true
-        if (!inNotice) return false
+
         swipeToggle = !swipeToggle
-        // ekbar accessibility scroll, porer bar gesture swipe (WebView e duto-i kaj kore)
+        // ekbar accessibility scroll, porer bar gesture swipe
         if (swipeToggle && scroll(root)) return true
-        swipe(m.widthPixels * 0.5f, m.heightPixels * 0.70f, m.widthPixels * 0.5f, m.heightPixels * 0.25f, 400)
+        swipeUp()
         return true
+    }
+
+    private fun swipeUp() {
+        val m = resources.displayMetrics
+        gestureOk = swipe(m.widthPixels * 0.5f, m.heightPixels * 0.70f, m.widthPixels * 0.5f, m.heightPixels * 0.25f, 400)
     }
 
     // ---------------- Helpers ----------------
