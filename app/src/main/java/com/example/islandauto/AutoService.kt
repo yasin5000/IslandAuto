@@ -27,6 +27,7 @@ class AutoService : AccessibilityService() {
     companion object {
         @Volatile var instance: AutoService? = null
         const val ISLAND = "com.oasisfeng.island"
+        const val PLAY = "Google Play Store"
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -34,11 +35,17 @@ class AutoService : AccessibilityService() {
     private lateinit var container: FrameLayout
     private lateinit var toolbar: LinearLayout
     private lateinit var bubble: TextView
+    private lateinit var destroyBtn: Button
     private lateinit var lp: WindowManager.LayoutParams
 
-    // 0 = idle, 1 = Island welcome (arrow/ACCEPT), 2 = ACCEPT & CONTINUE, 3 = Play Store
+    // 0 = idle
+    // Run flow:     1/2 = ACCEPT / ACCEPT & CONTINUE, 3 = Play Store row, 4 = open arrow
+    // Destroy flow: 10 = 3-dot, 11 = Settings, 12 = Scoped Settings, 13 = Island,
+    //               14 = scroll + Destroy permanently, 15 = DESTROY (confirm)
     private var step = 0
     private var startTime = 0L
+    private var tries = 0
+    private var destroyArmed = false
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -77,8 +84,27 @@ class AutoService : AccessibilityService() {
         }
         val run = Button(this).apply {
             text = "\u25B6 Run Island"; isAllCaps = false; textSize = 13f
-            minWidth = 0; minHeight = 0; setPadding(dp(14), dp(6), dp(14), dp(6))
-            setOnClickListener { startFlow() }
+            minWidth = 0; minHeight = 0; setPadding(dp(12), dp(6), dp(12), dp(6))
+            setOnClickListener { startRun() }
+        }
+        destroyBtn = Button(this).apply {
+            text = "\uD83D\uDDD1 Destroy"; isAllCaps = false; textSize = 13f
+            minWidth = 0; minHeight = 0; setPadding(dp(12), dp(6), dp(12), dp(6))
+        }
+        // Destroy ekdom chap dile jeno na hoy: 1st tap = "Sure?", 3 sec er moddhe 2nd tap = chalu
+        destroyBtn.setOnClickListener {
+            if (!destroyArmed) {
+                destroyArmed = true
+                destroyBtn.text = "\u26A0 Sure?"
+                handler.postDelayed({
+                    destroyArmed = false
+                    destroyBtn.text = "\uD83D\uDDD1 Destroy"
+                }, 3000)
+            } else {
+                destroyArmed = false
+                destroyBtn.text = "\uD83D\uDDD1 Destroy"
+                startDestroy()
+            }
         }
         val hide = Button(this).apply {
             text = "\u2715"; textSize = 13f; minWidth = 0; minHeight = 0
@@ -87,6 +113,7 @@ class AutoService : AccessibilityService() {
         }
         toolbar.addView(handle)
         toolbar.addView(run)
+        toolbar.addView(destroyBtn)
         toolbar.addView(hide)
 
         bubble = TextView(this).apply {
@@ -158,14 +185,15 @@ class AutoService : AccessibilityService() {
         container.visibility = View.VISIBLE; expand()
     }
 
-    // ---------------- Automation flow ----------------
+    // ---------------- Flow control ----------------
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
 
-    private fun startFlow() {
+    private fun launchIsland(firstStep: Int) {
         val i = packageManager.getLaunchIntentForPackage(ISLAND)
         if (i == null) { toast("Island app install kora nai"); return }
-        step = 1
+        step = firstStep
+        tries = 0
         startTime = SystemClock.uptimeMillis()
         container.visibility = View.GONE          // automation cholar somoy toolbar lukiye thakbe
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -173,6 +201,9 @@ class AutoService : AccessibilityService() {
         handler.removeCallbacks(tick)
         handler.postDelayed(tick, 2000)
     }
+
+    private fun startRun() = launchIsland(1)
+    private fun startDestroy() = launchIsland(10)
 
     private fun finishFlow(msg: String) {
         step = 0
@@ -194,26 +225,46 @@ class AutoService : AccessibilityService() {
     private fun process() {
         val root = rootInActiveWindow ?: return
         val pkg = root.packageName?.toString() ?: ""
+        tries++
         when (step) {
+            // ---------- Run flow ----------
             1, 2 -> {
-                // System work-profile screen: ACCEPT & CONTINUE
-                if (clickText(root, "ACCEPT & CONTINUE")) { step = 3; return }
+                if (clickText(root, "ACCEPT & CONTINUE")) { step = 3; tries = 0; return }
                 if (pkg == ISLAND) {
-                    // Island welcome: ACCEPT
                     if (clickText(root, "ACCEPT")) { step = 2; return }
-                    // already setup hole
                     if (step == 1 && root.findAccessibilityNodeInfosByText("MAINLAND").isNotEmpty()) {
-                        step = 3; return
+                        step = 3; tries = 0; return          // already setup
                     }
-                    // arrow (niche dan dik) click, na hole scroll
                     if (!clickBottomRight(root)) scroll(root)
                 }
             }
-            3 -> if (pkg == ISLAND && clickText(root, "Google Play Store")) {
-                finishFlow("Done \u2705 Play Store open")
+            3 -> if (pkg == ISLAND && clickText(root, PLAY)) { step = 4; tries = 0 }
+            4 -> if (pkg == ISLAND) {
+                // Play Store row chap dile pashe arrow ashe, sheta chap
+                if (clickRowRight(root, PLAY)) finishFlow("Done \u2705 Play Store open")
+                else if (tries % 5 == 0) clickText(root, PLAY)
             }
+
+            // ---------- Destroy flow ----------
+            10 -> if (pkg == ISLAND) {
+                if (root.findAccessibilityNodeInfosByText("MAINLAND").isNotEmpty()) {
+                    if (clickTopRight(root)) { step = 11; tries = 0 }       // 3 dot
+                } else if (tries <= 3) {
+                    performGlobalAction(GLOBAL_ACTION_BACK)                  // main screen e fera
+                }
+            }
+            11 -> if (clickExact(root, "Settings")) { step = 12; tries = 0 }
+            12 -> if (clickExact(root, "Scoped Settings")) { step = 13; tries = 0 }
+            13 -> if (clickExact(root, "Island")) { step = 14; tries = 0 }
+            14 -> {
+                if (clickText(root, "Destroy permanently")) { step = 15; tries = 0 }
+                else scroll(root)                                           // ekdom niche scroll
+            }
+            15 -> if (clickExact(root, "DESTROY")) finishFlow("Destroy done \u2705")
         }
     }
+
+    // ---------------- Helpers ----------------
 
     private fun clickText(root: AccessibilityNodeInfo, t: String): Boolean {
         for (n in root.findAccessibilityNodeInfosByText(t)) {
@@ -224,12 +275,67 @@ class AutoService : AccessibilityService() {
         return false
     }
 
+    // Poro text ta hubohu mile gele click (substring na)
+    private fun clickExact(root: AccessibilityNodeInfo, t: String): Boolean {
+        fun walk(n: AccessibilityNodeInfo): Boolean {
+            val s = (n.text ?: n.contentDescription)?.toString()
+            if (s != null && s.trim().equals(t, ignoreCase = true)) {
+                var x: AccessibilityNodeInfo? = n
+                while (x != null && !x.isClickable) x = x.parent
+                if (x != null && x.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+            }
+            for (i in 0 until n.childCount) {
+                val c = n.getChild(i) ?: continue
+                if (walk(c)) return true
+            }
+            return false
+        }
+        return walk(root)
+    }
+
     private fun clickBottomRight(root: AccessibilityNodeInfo): Boolean {
         val m = resources.displayMetrics
         val r = Rect()
         fun walk(n: AccessibilityNodeInfo): Boolean {
             n.getBoundsInScreen(r)
             if (n.isClickable && r.centerX() > m.widthPixels * 0.6 && r.centerY() > m.heightPixels * 0.8) {
+                if (n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+            }
+            for (i in 0 until n.childCount) {
+                val c = n.getChild(i) ?: continue
+                if (walk(c)) return true
+            }
+            return false
+        }
+        return walk(root)
+    }
+
+    // Upore dan dik er sobcheye dan er clickable button (3 dot)
+    private fun clickTopRight(root: AccessibilityNodeInfo): Boolean {
+        val m = resources.displayMetrics
+        val r = Rect()
+        var best: AccessibilityNodeInfo? = null
+        var bestX = -1
+        fun walk(n: AccessibilityNodeInfo) {
+            n.getBoundsInScreen(r)
+            if (n.isClickable && r.centerY() < m.heightPixels * 0.2 && r.width() < m.widthPixels * 0.3 &&
+                r.centerX() > bestX) { best = n; bestX = r.centerX() }
+            for (i in 0 until n.childCount) { n.getChild(i)?.let { walk(it) } }
+        }
+        walk(root)
+        return best?.performAction(AccessibilityNodeInfo.ACTION_CLICK) ?: false
+    }
+
+    // label er same row er dan dik er clickable (open arrow)
+    private fun clickRowRight(root: AccessibilityNodeInfo, label: String): Boolean {
+        val m = resources.displayMetrics
+        val lab = root.findAccessibilityNodeInfosByText(label).firstOrNull() ?: return false
+        val lr = Rect(); lab.getBoundsInScreen(lr)
+        val r = Rect()
+        fun walk(n: AccessibilityNodeInfo): Boolean {
+            n.getBoundsInScreen(r)
+            if (n.isClickable && r.centerX() > m.widthPixels * 0.75 && r.width() < m.widthPixels * 0.4 &&
+                lr.centerY() >= r.top && lr.centerY() <= r.bottom) {
                 if (n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
             }
             for (i in 0 until n.childCount) {
