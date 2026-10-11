@@ -5,7 +5,6 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
-import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
@@ -75,7 +74,7 @@ class MainActivity : Activity() {
         emailBox = EditText(this).apply {
             hint = "Email ekhane dekhabe"
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
-            singleLine = true
+            setSingleLine(true)
         }
         val btnNext = Button(this).apply {
             text = "Next Email (list theke remove)"
@@ -114,7 +113,9 @@ class MainActivity : Activity() {
         setContentView(scroll)
     }
 
-    private fun serviceStatusText(): String = if (AutoService.instance != null) "Service: ON ✅" else "Service: OFF ❌\nAccessibility e 'Island Auto' ON korun"
+    private fun serviceStatusText(): String =
+        if (AutoService.instance != null) "Service: ON ✅"
+        else "Service: OFF ❌\nAccessibility e 'Island Auto' ON korun"
 
     private fun updateFileStatus() {
         fileStatus.text = "File: $sourceFileName\nBaki email: ${remainingEmails.size}"
