@@ -248,9 +248,16 @@ class AutoService : AccessibilityService() {
                 if (tries >= 2 && tapRowRight(root, PLAY)) { step = 5; tries = 0 }
             }
             5 -> {
-                // Island theke baire (Play Store e) chole gele done
-                if (pkg != ISLAND && pkg.isNotEmpty()) finishFlow("Done \u2705 Play Store open")
-                else if (tries >= 4) { step = 4; tries = 0 }   // kaj hoy ni, abar try
+                // Play Store open howar por Sign in button khuje click korbe.
+                if (pkg != ISLAND && pkg.isNotEmpty()) {
+                    if (clickText(root, "Sign in")) {
+                        finishFlow("Done \u2705 Play Store Sign in clicked")
+                    } else if (tries >= 20) {
+                        finishFlow("Play Store open, Sign in button paoa jayni")
+                    }
+                } else if (tries >= 4) {
+                    step = 4; tries = 0   // Play Store open hoyni, abar try
+                }
             }
 
             // ---------- Destroy flow ----------
