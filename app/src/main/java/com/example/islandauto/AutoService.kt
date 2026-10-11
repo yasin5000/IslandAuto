@@ -8,6 +8,8 @@ import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -30,6 +32,9 @@ class AutoService : AccessibilityService() {
         @Volatile var instance: AutoService? = null
         const val ISLAND = "com.oasisfeng.island"
         const val PLAY = "Google Play Store"
+        const val SEARCH_TEXT = "tigo"
+        const val BIRTH_YEAR = 2000      // jei year chai
+        const val DEFAULT_YEAR = 2001    // Tigo birthday picker er default
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -41,13 +46,21 @@ class AutoService : AccessibilityService() {
     private lateinit var lp: WindowManager.LayoutParams
 
     // 0 = idle
-    // Run flow:     1/2 = ACCEPT / ACCEPT & CONTINUE, 3 = Play Store row, 4 = open arrow, 5 = verify
-    // Destroy flow: 10 = 3-dot, 11 = Settings, 12 = Scoped Settings, 13 = Island,
-    //               14 = scroll + Destroy permanently, 15 = DESTROY (confirm)
+    // Run flow:     1/2 = ACCEPT / ACCEPT & CONTINUE, 3 = Play Store row, 4 = open arrow, 5 = Sign in,
+    //               6 = user login dewar por "I understand"/"I agree" click, 8 = Search tab,
+    //               9 = "tigo" type, 10 = search submit, 11 = Install click, 12 = download shesh hole Open click,
+    //               13 = Tigo e "Google" button, 14 = Choose an account e Gmail select,
+    //               15 = Gender: Male, 16 = Confirm,
+    //               17 = Birthday year 2001 -> 2000, 18 = Birthday Confirm,
+    //               30 = Home e profile (man) icon, 31 = "Daily Bonus"
+    // Destroy flow: 20 = 3-dot, 21 = Settings, 22 = Scoped Settings, 23 = Island,
+    //               24 = scroll + Destroy permanently, 25 = DESTROY (confirm)
     private var step = 0
     private var startTime = 0L
     private var tries = 0
     private var destroyArmed = false
+    private var lastInstallY = -1
+    private var birthRowY = -1
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -205,7 +218,7 @@ class AutoService : AccessibilityService() {
     }
 
     private fun startRun() = launchIsland(1)
-    private fun startDestroy() = launchIsland(10)
+    private fun startDestroy() = launchIsland(20)
 
     private fun finishFlow(msg: String) {
         step = 0
@@ -218,7 +231,9 @@ class AutoService : AccessibilityService() {
     private val tick = object : Runnable {
         override fun run() {
             if (step == 0) return
-            if (SystemClock.uptimeMillis() - startTime > 90_000) { finishFlow("Timeout, abar try korun"); return }
+            // step 6 e user nijer Gmail/password dey, tai beshi somoy (5 min)
+            val limit = if (step == 6 || step == 12) 300_000L else 120_000L
+            if (SystemClock.uptimeMillis() - startTime > limit) { finishFlow("Timeout, abar try korun"); return }
             try { process() } catch (_: Exception) {}
             handler.postDelayed(this, 800)
         }
@@ -251,7 +266,9 @@ class AutoService : AccessibilityService() {
                 // Play Store open howar por Sign in button khuje click korbe.
                 if (pkg != ISLAND && pkg.isNotEmpty()) {
                     if (clickText(root, "Sign in")) {
-                        finishFlow("Done \u2705 Play Store Sign in clicked")
+                        // Sign in click hoyeche; ekhon user Gmail/pass dibe, tarpor "I understand" click hobe
+                        step = 6; tries = 0
+                        startTime = SystemClock.uptimeMillis()
                     } else if (tries >= 20) {
                         finishFlow("Play Store open, Sign in button paoa jayni")
                     }
@@ -260,26 +277,336 @@ class AutoService : AccessibilityService() {
                 }
             }
 
+            // User Gmail + password dewar por "I understand" / "I agree" click
+            6 -> {
+                if (clickText(root, "I understand")) { tries = 0; return }
+                if (clickText(root, "I agree")) { step = 8; tries = 0; startTime = SystemClock.uptimeMillis(); return }
+                // login er age jeno step 9 e na jay: "Sign in" na thakle tobei Search tab
+                val signInGone = root.findAccessibilityNodeInfosByText("Sign in").isEmpty()
+                if (pkg == "com.android.vending" && signInGone && tries > 3 && clickExact(root, "Search")) {
+                    step = 9; tries = 0; startTime = SystemClock.uptimeMillis()
+                }
+            }
+            // I agree er por: (jodi ashe) Google services "Accept", tarpor Play Store home er Search tab
+            8 -> {
+                if (clickText(root, "Accept")) return
+                if (clickText(root, "I agree")) return
+                if (clickExact(root, "Search")) { step = 9; tries = 0 }
+            }
+            // Search box e "tigo" type
+            9 -> {
+                val box = findEditable(root)
+                if (box == null) {
+                    // Search tab e age non-editable "Search apps & games" bar thake, shetay click
+                    if (clickText(root, "Search apps")) return
+                    if (tries >= 20) finishFlow("Search box paoa jayni")
+                    return
+                }
+                box.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                box.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                val args = Bundle().apply {
+                    putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, SEARCH_TEXT)
+                }
+                if (box.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) { step = 10; tries = 0 }
+                else if (tries >= 12) finishFlow("Text type kora jayni")
+            }
+            // Search submit (keyboard enter), na hole typed suggestion click
+            10 -> {
+                val box = findEditable(root)
+                var ok = false
+                if (box != null && Build.VERSION.SDK_INT >= 30) {
+                    ok = box.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+                }
+                if (!ok) ok = clickSuggestion(root, SEARCH_TEXT)
+                if (ok) { step = 11; tries = 0; startTime = SystemClock.uptimeMillis() }
+                else if (tries >= 10) finishFlow("Search submit kora jayni")
+            }
+            // Result ashle "tigo" er row er Install button click
+            11 -> {
+                if (clickInstall(root)) { step = 12; tries = 0; startTime = SystemClock.uptimeMillis(); return }
+                // already install thakle Install er jaygay "Open" thake
+                if (tries >= 6 && root.findAccessibilityNodeInfosByText("Open").isNotEmpty()) {
+                    finishFlow("App ager theke installed ache"); return
+                }
+                if (tries >= 30) finishFlow("Install button paoa jayni")
+            }
+            // Download/install shesh hole je Install button chhilo shetai "Open" hoye jay, seta click
+            12 -> {
+                if (pkg == "com.android.vending") {
+                    if (clickOpenNear(root, lastInstallY)) { step = 13; tries = 0; startTime = SystemClock.uptimeMillis(); return }
+                    // layout sore gele (60 tick ~ 48 sec por) je kono Open
+                    if (tries >= 60 && clickExact(root, "Open")) { step = 13; tries = 0; startTime = SystemClock.uptimeMillis() }
+                }
+            }
+            // Tigo login page: "Google" button click
+            13 -> {
+                if (pkg == "com.android.vending" || pkg == ISLAND || pkg.isEmpty()) {
+                    // Tigo ekhono khole ni; Open click na hoye thakle abar chesta
+                    if (tries % 8 == 0) clickOpenNear(root, lastInstallY)
+                    return
+                }
+                if (clickExact(root, "Google")) { step = 14; tries = 0; startTime = SystemClock.uptimeMillis(); return }
+                // button er text accessibility te na dile: screen er nicher dike (~73%) tap
+                if (tries >= 20) {
+                    val m = resources.displayMetrics
+                    if (tapAt(m.widthPixels * 0.5f, m.heightPixels * 0.73f)) {
+                        step = 14; tries = 0; startTime = SystemClock.uptimeMillis()
+                    }
+                }
+            }
+            // "Choose an account": prothom Gmail account select
+            14 -> {
+                val chooser = pkg == "com.google.android.gms" ||
+                    root.findAccessibilityNodeInfosByText("Choose an account").isNotEmpty()
+                if (chooser && clickAccount(root)) { step = 15; tries = 0; startTime = SystemClock.uptimeMillis(); return }
+                if (tries >= 20) finishFlow("Account list paoa jayni")
+            }
+
+            // Gender page: "Male" select
+            15 -> {
+                if (clickMale(root)) { step = 16; tries = 0; return }
+                if (tries >= 40) finishFlow("Gender page / Male paoa jayni")
+            }
+            // Male select hole "Confirm" enable hoy, seta (ba "Continue") click
+            16 -> {
+                if (tries < 2) return
+                if (clickEnabled(root, "Confirm") || clickEnabled(root, "Continue")) {
+                    step = 17; tries = 0; birthRowY = -1; startTime = SystemClock.uptimeMillis()
+                } else if (tries >= 15) finishFlow("Confirm click kora jayni")
+            }
+
+            // Birthday page: year wheel DEFAULT_YEAR (2001) theke BIRTH_YEAR (2000) e ana
+            17 -> {
+                if (tries < 2) return
+                val cur = findExact(root, DEFAULT_YEAR.toString())
+                val tgt = findExact(root, BIRTH_YEAR.toString())
+                if (cur != null && tgt != null) {
+                    val cr = Rect(); cur.getBoundsInScreen(cr)
+                    val tr = Rect(); tgt.getBoundsInScreen(tr)
+                    if (birthRowY < 0) birthRowY = cr.centerY()          // default year er row = selected row
+                    if (abs(tr.centerY() - birthRowY) <= dp(20)) { step = 18; tries = 0; return }   // 2000 select hoyeche
+                    swipe(cr.centerX().toFloat(), cr.centerY().toFloat(), tr.centerX().toFloat(), tr.centerY().toFloat(), 350)
+                    return
+                }
+                // wheel er text accessibility te na dile: Year column e ek ghor niche swipe (andaj coordinate)
+                if (tries >= 8) {
+                    val w = resources.displayMetrics.widthPixels.toFloat()
+                    swipe(w * 0.13f, w * 0.70f, w * 0.13f, w * 0.87f, 350)
+                    step = 18; tries = 0
+                }
+            }
+            // Wheel thamle "Confirm" click
+            18 -> {
+                if (tries < 2) return
+                if (clickEnabled(root, "Confirm")) { step = 30; tries = 0; startTime = SystemClock.uptimeMillis(); return }
+                // Confirm er text na pele andaj coordinate tap
+                if (tries >= 6) {
+                    val w = resources.displayMetrics.widthPixels.toFloat()
+                    tapAt(w * 0.5f, w * 1.18f)
+                    step = 30; tries = 0; startTime = SystemClock.uptimeMillis()
+                }
+            }
+
+            // Home page: niche dan dike (man) profile icon click
+            30 -> {
+                if (tries < 3) return
+                if (pkg == "com.android.vending" || pkg == ISLAND || pkg.isEmpty()) return
+                if (clickBottomNavLast(root)) { step = 31; tries = 0; return }
+                // icon node na pele andaj coordinate tap (screen er dan-niche)
+                if (tries >= 10) {
+                    val m = resources.displayMetrics
+                    if (tapAt(m.widthPixels * 0.875f, m.heightPixels * 0.88f)) { step = 31; tries = 0 }
+                }
+            }
+            // Profile page: "Daily Bonus" click
+            31 -> {
+                if (clickExact(root, "Daily Bonus")) { finishFlow("Daily Bonus click kora hoyeche \u2705"); return }
+                if (tries >= 25) finishFlow("Daily Bonus paoa jayni")
+            }
+
             // ---------- Destroy flow ----------
-            10 -> if (pkg == ISLAND) {
+            20 -> if (pkg == ISLAND) {
                 if (root.findAccessibilityNodeInfosByText("MAINLAND").isNotEmpty()) {
-                    if (clickTopRight(root)) { step = 11; tries = 0 }       // 3 dot
+                    if (clickTopRight(root)) { step = 21; tries = 0 }       // 3 dot
                 } else if (tries <= 3) {
                     performGlobalAction(GLOBAL_ACTION_BACK)                  // main screen e fera
                 }
             }
-            11 -> if (clickExact(root, "Settings")) { step = 12; tries = 0 }
-            12 -> if (clickExact(root, "Scoped Settings")) { step = 13; tries = 0 }
-            13 -> if (clickExact(root, "Island")) { step = 14; tries = 0 }
-            14 -> {
-                if (clickText(root, "Destroy permanently")) { step = 15; tries = 0 }
+            21 -> if (clickExact(root, "Settings")) { step = 22; tries = 0 }
+            22 -> if (clickExact(root, "Scoped Settings")) { step = 23; tries = 0 }
+            23 -> if (clickExact(root, "Island")) { step = 24; tries = 0 }
+            24 -> {
+                if (clickText(root, "Destroy permanently")) { step = 25; tries = 0 }
                 else scroll(root)                                           // ekdom niche scroll
             }
-            15 -> if (clickExact(root, "DESTROY")) finishFlow("Destroy done \u2705")
+            25 -> if (clickExact(root, "DESTROY")) finishFlow("Destroy done \u2705")
         }
     }
 
     // ---------------- Helpers ----------------
+
+    private fun findEditable(n: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        if (n.isEditable) return n
+        for (i in 0 until n.childCount) {
+            val c = n.getChild(i) ?: continue
+            findEditable(c)?.let { return it }
+        }
+        return null
+    }
+
+    // Editable na emon node jar text e search word ache (suggestion row)
+    private fun clickSuggestion(root: AccessibilityNodeInfo, t: String): Boolean {
+        for (n in root.findAccessibilityNodeInfosByText(t)) {
+            if (n.isEditable) continue
+            var x: AccessibilityNodeInfo? = n
+            while (x != null && !x.isClickable) x = x.parent
+            if (x != null && x.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+        }
+        return false
+    }
+
+    // Sponsored (ad) bad diye prothom asol Install button click.
+    // "Sponsored" label er thik niche je Install ta prothom ashe, seta ad.
+    private fun clickInstall(root: AccessibilityNodeInfo): Boolean {
+        val installs = mutableListOf<AccessibilityNodeInfo>()
+        val sponsoredBottoms = mutableListOf<Int>()
+        val r = Rect()
+        fun walk(n: AccessibilityNodeInfo) {
+            val s = (n.text ?: n.contentDescription)?.toString()?.trim()
+            if (s != null) {
+                if (s.equals("Install", ignoreCase = true)) installs.add(n)
+                else if (s.startsWith("Sponsored", ignoreCase = true)) {
+                    n.getBoundsInScreen(r); sponsoredBottoms.add(r.bottom)
+                }
+            }
+            for (i in 0 until n.childCount) { n.getChild(i)?.let { walk(it) } }
+        }
+        walk(root)
+        if (installs.isEmpty()) return false
+
+        // uporer theke niche sajao
+        val sorted = installs.map { n -> n.getBoundsInScreen(r); Pair(r.centerY(), n) }.sortedBy { it.first }
+        val adIdx = HashSet<Int>()
+        for (sy in sponsoredBottoms) {
+            val idx = sorted.indexOfFirst { it.first >= sy }
+            if (idx >= 0) adIdx.add(idx)
+        }
+        var target: AccessibilityNodeInfo? = null
+        for ((i, p) in sorted.withIndex()) {
+            if (i !in adIdx) { target = p.second; break }
+        }
+        if (target == null) { scroll(root); return false }   // shob ad, niche scroll kore dekhi
+
+        target.getBoundsInScreen(r)
+        lastInstallY = r.centerY()
+        var x: AccessibilityNodeInfo? = target
+        while (x != null && !x.isClickable) x = x.parent
+        return x?.performAction(AccessibilityNodeInfo.ACTION_CLICK) ?: false
+    }
+
+    // Install button er same row er "Open" button click
+    private fun clickOpenNear(root: AccessibilityNodeInfo, y: Int): Boolean {
+        val opens = mutableListOf<AccessibilityNodeInfo>()
+        fun walk(n: AccessibilityNodeInfo) {
+            val s = (n.text ?: n.contentDescription)?.toString()?.trim()
+            if (s != null && s.equals("Open", ignoreCase = true)) opens.add(n)
+            for (i in 0 until n.childCount) { n.getChild(i)?.let { walk(it) } }
+        }
+        walk(root)
+        if (opens.isEmpty() || y < 0) return false
+        val r = Rect()
+        var target: AccessibilityNodeInfo? = null
+        var best = Int.MAX_VALUE
+        for (n in opens) {
+            n.getBoundsInScreen(r)
+            val d = abs(r.centerY() - y)
+            if (d < best) { best = d; target = n }
+        }
+        if (target == null || best > dp(120)) return false
+        var x: AccessibilityNodeInfo? = target
+        while (x != null && !x.isClickable) x = x.parent
+        return x?.performAction(AccessibilityNodeInfo.ACTION_CLICK) ?: false
+    }
+
+    // "@" thaka prothom account row click ("Add another account" e @ nei, tai bad jabe)
+    private fun clickAccount(root: AccessibilityNodeInfo): Boolean {
+        fun walk(n: AccessibilityNodeInfo): Boolean {
+            val s = (n.text ?: n.contentDescription)?.toString()
+            if (s != null && s.contains("@") && !n.isEditable) {
+                var x: AccessibilityNodeInfo? = n
+                while (x != null && !x.isClickable) x = x.parent
+                if (x != null && x.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+            }
+            for (i in 0 until n.childCount) {
+                val c = n.getChild(i) ?: continue
+                if (walk(c)) return true
+            }
+            return false
+        }
+        return walk(root)
+    }
+
+    // "Male" label click. Shabdhan: findAccessibilityNodeInfosByText("Male") "Female" o dhore, tai exact match
+    private fun clickMale(root: AccessibilityNodeInfo): Boolean {
+        val lab = root.findAccessibilityNodeInfosByText("Male").firstOrNull {
+            (it.text ?: it.contentDescription)?.toString()?.trim().equals("Male", ignoreCase = true)
+        } ?: return false
+        var x: AccessibilityNodeInfo? = lab
+        while (x != null && !x.isClickable) x = x.parent
+        if (x != null && x.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+        // clickable node na pele label er upor tap
+        val r = Rect(); lab.getBoundsInScreen(r)
+        return tapAt(r.centerX().toFloat(), r.centerY().toFloat())
+    }
+
+    // Enabled thakle tobei exact text e click (disabled "Confirm" skip)
+    private fun clickEnabled(root: AccessibilityNodeInfo, t: String): Boolean {
+        fun walk(n: AccessibilityNodeInfo): Boolean {
+            val s = (n.text ?: n.contentDescription)?.toString()
+            if (s != null && s.trim().equals(t, ignoreCase = true)) {
+                var x: AccessibilityNodeInfo? = n
+                while (x != null && !x.isClickable) x = x.parent
+                if (x != null && x.isEnabled && x.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+            }
+            for (i in 0 until n.childCount) {
+                val c = n.getChild(i) ?: continue
+                if (walk(c)) return true
+            }
+            return false
+        }
+        return walk(root)
+    }
+
+    private fun findExact(root: AccessibilityNodeInfo, t: String): AccessibilityNodeInfo? {
+        for (n in root.findAccessibilityNodeInfosByText(t)) {
+            if ((n.text ?: n.contentDescription)?.toString()?.trim() == t) return n
+        }
+        return null
+    }
+
+    private fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, dur: Long): Boolean {
+        val p = Path().apply { moveTo(x1, y1); lineTo(x2, y2) }
+        val g = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(p, 0, dur))
+            .build()
+        return dispatchGesture(g, null, null)
+    }
+
+    // Niche tab bar er sobcheye dan er clickable icon (profile)
+    private fun clickBottomNavLast(root: AccessibilityNodeInfo): Boolean {
+        val m = resources.displayMetrics
+        val r = Rect()
+        var best: AccessibilityNodeInfo? = null
+        var bestX = -1
+        fun walk(n: AccessibilityNodeInfo) {
+            n.getBoundsInScreen(r)
+            if (n.isClickable && r.centerY() > m.heightPixels * 0.80 && r.centerY() < m.heightPixels * 0.95 &&
+                r.width() < m.widthPixels * 0.35 && r.centerX() > bestX) { best = n; bestX = r.centerX() }
+            for (i in 0 until n.childCount) { n.getChild(i)?.let { walk(it) } }
+        }
+        walk(root)
+        return best?.performAction(AccessibilityNodeInfo.ACTION_CLICK) ?: false
+    }
 
     private fun canClick(n: AccessibilityNodeInfo): Boolean =
         n.isClickable || n.actionList.any { it.id == AccessibilityNodeInfo.ACTION_CLICK }
