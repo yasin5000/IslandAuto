@@ -1,8 +1,10 @@
 package com.example.islandauto
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
 import android.content.Intent
 import android.graphics.Color
+import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
@@ -39,7 +41,7 @@ class AutoService : AccessibilityService() {
     private lateinit var lp: WindowManager.LayoutParams
 
     // 0 = idle
-    // Run flow:     1/2 = ACCEPT / ACCEPT & CONTINUE, 3 = Play Store row, 4 = open arrow
+    // Run flow:     1/2 = ACCEPT / ACCEPT & CONTINUE, 3 = Play Store row, 4 = open arrow, 5 = verify
     // Destroy flow: 10 = 3-dot, 11 = Settings, 12 = Scoped Settings, 13 = Island,
     //               14 = scroll + Destroy permanently, 15 = DESTROY (confirm)
     private var step = 0
@@ -241,8 +243,14 @@ class AutoService : AccessibilityService() {
             3 -> if (pkg == ISLAND && clickText(root, PLAY)) { step = 4; tries = 0 }
             4 -> if (pkg == ISLAND) {
                 // Play Store row chap dile pashe arrow ashe, sheta chap
-                if (clickRowRight(root, PLAY)) finishFlow("Done \u2705 Play Store open")
-                else if (tries % 5 == 0) clickText(root, PLAY)
+                if (clickRowRight(root, PLAY)) { step = 5; tries = 0; return }
+                // arrow node na pele: row er dan prante coordinate tap
+                if (tries >= 2 && tapRowRight(root, PLAY)) { step = 5; tries = 0 }
+            }
+            5 -> {
+                // Island theke baire (Play Store e) chole gele done
+                if (pkg != ISLAND && pkg.isNotEmpty()) finishFlow("Done \u2705 Play Store open")
+                else if (tries >= 4) { step = 4; tries = 0 }   // kaj hoy ni, abar try
             }
 
             // ---------- Destroy flow ----------
@@ -265,6 +273,9 @@ class AutoService : AccessibilityService() {
     }
 
     // ---------------- Helpers ----------------
+
+    private fun canClick(n: AccessibilityNodeInfo): Boolean =
+        n.isClickable || n.actionList.any { it.id == AccessibilityNodeInfo.ACTION_CLICK }
 
     private fun clickText(root: AccessibilityNodeInfo, t: String): Boolean {
         for (n in root.findAccessibilityNodeInfosByText(t)) {
@@ -334,7 +345,7 @@ class AutoService : AccessibilityService() {
         val r = Rect()
         fun walk(n: AccessibilityNodeInfo): Boolean {
             n.getBoundsInScreen(r)
-            if (n.isClickable && r.centerX() > m.widthPixels * 0.75 && r.width() < m.widthPixels * 0.4 &&
+            if (canClick(n) && r.centerX() > m.widthPixels * 0.7 && r.width() < m.widthPixels * 0.4 &&
                 lr.centerY() >= r.top && lr.centerY() <= r.bottom) {
                 if (n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
             }
@@ -345,6 +356,22 @@ class AutoService : AccessibilityService() {
             return false
         }
         return walk(root)
+    }
+
+    // Row er dan prante (arrow er jayga) screen tap
+    private fun tapRowRight(root: AccessibilityNodeInfo, label: String): Boolean {
+        val lab = root.findAccessibilityNodeInfosByText(label).firstOrNull() ?: return false
+        val lr = Rect(); lab.getBoundsInScreen(lr)
+        val m = resources.displayMetrics
+        return tapAt((m.widthPixels - dp(28)).toFloat(), lr.centerY().toFloat())
+    }
+
+    private fun tapAt(x: Float, y: Float): Boolean {
+        val p = Path().apply { moveTo(x, y) }
+        val g = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(p, 0, 80))
+            .build()
+        return dispatchGesture(g, null, null)
     }
 
     private fun scroll(root: AccessibilityNodeInfo): Boolean {
