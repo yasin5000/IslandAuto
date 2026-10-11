@@ -56,6 +56,18 @@ class AutoService : AccessibilityService() {
     // Destroy flow: 20 = 3-dot, 21 = Settings, 22 = Scoped Settings, 23 = Island,
     //               24 = scroll + Destroy permanently, 25 = DESTROY (confirm)
     private var step = 0
+        set(v) {
+            val old = field
+            field = v
+            if (old != v) onStepChanged(old, v)
+        }
+    private var stepSince = 0L
+    private var lastDone = ""
+    private var inNotice = false          // "Welcome to your new account" notice screen e achi
+    private var lastUnderstandAt = 0L
+    private var swipeToggle = false
+    private lateinit var statusView: TextView
+    private lateinit var statusLp: WindowManager.LayoutParams
     private var startTime = 0L
     private var tries = 0
     private var destroyArmed = false
@@ -68,6 +80,7 @@ class AutoService : AccessibilityService() {
         instance = this
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
         buildOverlay()
+        buildStatusOverlay()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
@@ -77,6 +90,7 @@ class AutoService : AccessibilityService() {
         instance = null
         handler.removeCallbacksAndMessages(null)
         try { wm.removeView(container) } catch (_: Exception) {}
+        try { wm.removeView(statusView) } catch (_: Exception) {}
         super.onDestroy()
     }
 
@@ -211,6 +225,9 @@ class AutoService : AccessibilityService() {
         tries = 0
         startTime = SystemClock.uptimeMillis()
         container.visibility = View.GONE          // automation cholar somoy toolbar lukiye thakbe
+        lastDone = ""; inNotice = false
+        stepSince = SystemClock.uptimeMillis()
+        showStatus("\u25B6 Shuru: " + stepName(firstStep), 0xEE1565C0.toInt())
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         startActivity(i)
         handler.removeCallbacks(tick)
@@ -221,6 +238,10 @@ class AutoService : AccessibilityService() {
     private fun startDestroy() = launchIsland(20)
 
     private fun finishFlow(msg: String) {
+        val ok = msg.contains("\u2705") || msg.contains("done", true) || msg.contains("installed ache")
+        val where = if (step != 0) "\n\uD83D\uDCCD Ei step e: ${stepName(step)}" else ""
+        showStatus((if (ok) "\u2705 " else "\u274C ") + msg + where,
+            if (ok) 0xEE2E7D32.toInt() else 0xEEC62828.toInt(), if (ok) 6000 else 20000)
         step = 0
         handler.removeCallbacks(tick)
         container.visibility = View.VISIBLE
@@ -235,6 +256,7 @@ class AutoService : AccessibilityService() {
             val limit = if (step == 6 || step == 12) 300_000L else 120_000L
             if (SystemClock.uptimeMillis() - startTime > limit) { finishFlow("Timeout, abar try korun"); return }
             try { process() } catch (_: Exception) {}
+            if (step != 0) refreshStatus()
             handler.postDelayed(this, 800)
         }
     }
@@ -279,7 +301,7 @@ class AutoService : AccessibilityService() {
 
             // User Gmail + password dewar por "I understand" / "I agree" click
             6 -> {
-                if (clickText(root, "I understand")) { tries = 0; return }
+                if (handleUnderstand(root)) { tries = 0; return }
                 if (clickText(root, "I agree")) { step = 8; tries = 0; startTime = SystemClock.uptimeMillis(); return }
                 // login er age jeno step 9 e na jay: "Sign in" na thakle tobei Search tab
                 val signInGone = root.findAccessibilityNodeInfosByText("Sign in").isEmpty()
@@ -289,6 +311,7 @@ class AutoService : AccessibilityService() {
             }
             // I agree er por: (jodi ashe) Google services "Accept", tarpor Play Store home er Search tab
             8 -> {
+                if (handleUnderstand(root)) return
                 if (clickText(root, "Accept")) return
                 if (clickText(root, "I agree")) return
                 if (clickExact(root, "Search")) { step = 9; tries = 0 }
@@ -441,6 +464,126 @@ class AutoService : AccessibilityService() {
             }
             25 -> if (clickExact(root, "DESTROY")) finishFlow("Destroy done \u2705")
         }
+    }
+
+    // ---------------- Status notice (kon step shesh, kothay atke ase) ----------------
+
+    private fun stepName(s: Int): String = when (s) {
+        1, 2 -> "Island: ACCEPT"
+        3 -> "Island: Play Store row"
+        4 -> "Island: Play Store arrow"
+        5 -> "Play Store: Sign in button"
+        6 -> "Login + \"I understand\" notice"
+        8 -> "I agree / Accept"
+        9 -> "Search e \"tigo\" type"
+        10 -> "Search submit"
+        11 -> "Install button"
+        12 -> "Download cholche (Open er opekkha)"
+        13 -> "Tigo: Google button"
+        14 -> "Choose an account"
+        15 -> "Gender: Male"
+        16 -> "Gender Confirm"
+        17 -> "Birthday year"
+        18 -> "Birthday Confirm"
+        30 -> "Profile icon"
+        31 -> "Daily Bonus"
+        20 -> "Destroy: 3-dot menu"
+        21 -> "Destroy: Settings"
+        22 -> "Destroy: Scoped Settings"
+        23 -> "Destroy: Island"
+        24 -> "Destroy: Destroy permanently"
+        25 -> "Destroy: DESTROY confirm"
+        else -> "Step $s"
+    }
+
+    private fun buildStatusOverlay() {
+        statusView = TextView(this).apply {
+            textSize = 13f; setTextColor(Color.WHITE)
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            background = GradientDrawable().apply {
+                setColor(0xEE263238.toInt()); cornerRadius = dp(14).toFloat()
+            }
+            visibility = View.GONE
+        }
+        statusLp = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            // NOT_TOUCHABLE: notice er pichone click/scroll jeno badha na pay
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            y = dp(60)
+        }
+        wm.addView(statusView, statusLp)
+    }
+
+    private val hideStatus = Runnable { statusView.visibility = View.GONE }
+
+    private fun showStatus(msg: String, color: Int, hideAfterMs: Long = 0) {
+        if (!::statusView.isInitialized) return
+        (statusView.background as GradientDrawable).setColor(color)
+        statusView.text = msg
+        statusView.visibility = View.VISIBLE
+        handler.removeCallbacks(hideStatus)
+        if (hideAfterMs > 0) handler.postDelayed(hideStatus, hideAfterMs)
+    }
+
+    private fun onStepChanged(old: Int, new: Int) {
+        stepSince = SystemClock.uptimeMillis()
+        if (old != 0 && new != 0) lastDone = stepName(old)
+        if (new != 0) refreshStatus()
+    }
+
+    private fun refreshStatus() {
+        val sec = (SystemClock.uptimeMillis() - stepSince) / 1000
+        val sb = StringBuilder()
+        if (lastDone.isNotEmpty()) sb.append("\u2705 Shesh: ").append(lastDone).append('\n')
+        val stuck = sec >= 15
+        sb.append(if (stuck) "\u26A0 Atke ase: " else "\u25B6 Cholche: ").append(stepName(step))
+        sb.append(" (").append(sec).append("s)")
+        showStatus(sb.toString(), if (stuck) 0xEEE65100.toInt() else 0xEE263238.toInt())
+    }
+
+    // ---------------- "I understand" notice (scroll lage kina auto bujhe) ----------------
+
+    private fun isNoticeScreen(root: AccessibilityNodeInfo): Boolean {
+        val keys = listOf("Welcome to your new account", "Your school manages", "Workspace for Education",
+            "ask your school", "internal policies")
+        return keys.any { root.findAccessibilityNodeInfosByText(it).isNotEmpty() }
+    }
+
+    // true = kichu ekta kora hoyeche (click ba scroll). Notice screen na hole false
+    private fun handleUnderstand(root: AccessibilityNodeInfo): Boolean {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastUnderstandAt < 2500) return inNotice      // click er por screen change er opekkha
+
+        val m = resources.displayMetrics
+        val r = Rect()
+        // 1) Button screen e dekha gele (scroll lagle o, na lagle o) click
+        val btn = root.findAccessibilityNodeInfosByText("I understand").firstOrNull {
+            it.getBoundsInScreen(r)
+            it.isVisibleToUser && r.height() > 0 && r.bottom <= m.heightPixels && r.top >= 0
+        }
+        if (btn != null) {
+            inNotice = true
+            btn.getBoundsInScreen(r)
+            var x: AccessibilityNodeInfo? = btn
+            while (x != null && !x.isClickable) x = x.parent
+            val ok = (x != null && x.isEnabled && x.performAction(AccessibilityNodeInfo.ACTION_CLICK)) ||
+                tapAt(r.centerX().toFloat(), r.centerY().toFloat())
+            if (ok) { lastUnderstandAt = now; inNotice = false; return true }
+            return true
+        }
+        // 2) Notice screen kintu button dekha jacche na -> niche scroll
+        if (isNoticeScreen(root)) inNotice = true
+        if (!inNotice) return false
+        swipeToggle = !swipeToggle
+        // ekbar accessibility scroll, porer bar gesture swipe (WebView e duto-i kaj kore)
+        if (swipeToggle && scroll(root)) return true
+        swipe(m.widthPixels * 0.5f, m.heightPixels * 0.70f, m.widthPixels * 0.5f, m.heightPixels * 0.25f, 400)
+        return true
     }
 
     // ---------------- Helpers ----------------
